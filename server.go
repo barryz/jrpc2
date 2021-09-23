@@ -32,6 +32,11 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/go-kit/kit/metrics"
+	"github.com/go-kit/kit/metrics/prometheus"
+	stdprome "github.com/prometheus/client_golang/prometheus"
 )
 
 // Error codes
@@ -196,6 +201,12 @@ type MethodWithContext struct {
 	Method func(ctx context.Context, params json.RawMessage) (interface{}, *ErrorObject)
 }
 
+// RpcMetrics metrics collection for json rpc methods.
+type RpcMetrics struct {
+	Counter   metrics.Counter
+	Histogram metrics.Histogram
+}
+
 // Server represents a jsonrpc 2.0 capable web server.
 type Server struct {
 	// Host is the host:port of the server.
@@ -206,6 +217,67 @@ type Server struct {
 	Route   string
 	Methods map[string]MethodWithContext
 	Headers map[string]string
+	// EnableMetrics a toggle that enable/disable prometheus metrics.
+	EnableMetrics bool
+	mrw           sync.RWMutex
+	metrics       map[string]*RpcMetrics
+}
+
+func (s *Server) registerMetrics(method string) {
+	if !s.EnableMetrics || s.metrics == nil || method == "" {
+		return
+	}
+
+	s.mrw.RLock()
+	defer s.mrw.RUnlock()
+	if _, ok := s.metrics[method]; ok {
+		return
+	}
+
+	s.metrics[method] = &RpcMetrics{
+		Counter: prometheus.NewCounterFrom(stdprome.CounterOpts{
+			Namespace: "jrpc2",
+			Subsystem: "rpc",
+			Name:      fmt.Sprintf("%s_count", method),
+			Help:      fmt.Sprintf("Total Requests of JSON-RPC %s method", method),
+		}, []string{"route"}),
+		Histogram: prometheus.NewHistogramFrom(stdprome.HistogramOpts{
+			Namespace: "jrpc2",
+			Subsystem: "rpc",
+			Name:      fmt.Sprintf("%s_duration", method),
+			Help:      fmt.Sprintf("Request duration in seconds of JSON-RPC %s method", method),
+			Buckets:   []float64{1, 5, 10, 25, 50, 100, 300, 500, 1000, 3000, 5000, 10000},
+		}, []string{"route"}),
+	}
+}
+
+func (s *Server) callOnBegin(method string) {
+	if !s.EnableMetrics || s.metrics == nil {
+		return
+	}
+
+	s.mrw.RLock()
+	defer s.mrw.RUnlock()
+	m, ok := s.metrics[method]
+	if !ok {
+		return
+	}
+	m.Counter.With("route", s.Route).Add(1)
+}
+
+func (s *Server) callOnEnd(method string, begin time.Time) {
+	if !s.EnableMetrics || s.metrics == nil {
+		return
+	}
+
+	s.mrw.RLock()
+	defer s.mrw.RUnlock()
+	m, ok := s.metrics[method]
+	if !ok {
+		return
+	}
+
+	m.Histogram.With("route", s.Route).Observe(float64(time.Since(begin).Milliseconds()))
 }
 
 // rpcHandler handles incoming rpc client requests.
@@ -322,6 +394,7 @@ func (s *Server) RegisterRPC(ctx context.Context, params json.RawMessage) (inter
 	}
 
 	s.Methods[*p.Name] = MethodWithContext{Url: *p.Url}
+	s.registerMetrics(*p.Name)
 
 	return "success", nil
 }
@@ -334,10 +407,12 @@ func (s *Server) Register(name string, method Method) {
 			return method.Method(params)
 		},
 	}
+	s.registerMetrics(name)
 }
 
 func (s *Server) RegisterWithContext(name string, method MethodWithContext) {
 	s.Methods[name] = method
+	s.registerMetrics(name)
 }
 
 // ParseRequest parses the json request body and unpacks into one or more.
@@ -417,6 +492,11 @@ func (s *Server) ValidateRequest(req *RequestObject) *ErrorObject {
 // If a method from the server Methods has a Method member will be called locally.
 // If a method from the server Methods has a Url member it will be called by proxy.
 func (s *Server) Call(ctx context.Context, name interface{}, params json.RawMessage) (interface{}, *ErrorObject) {
+	s.callOnBegin(name.(string))
+	defer func(begin time.Time) {
+		s.callOnEnd(name.(string), begin)
+	}(time.Now())
+
 	method, ok := s.Methods[name.(string)]
 	if !ok {
 		return nil, &ErrorObject{
@@ -507,12 +587,16 @@ func (s *Server) StartTLSWithMiddleware(certFile, keyFile string, m func(next ht
 }
 
 // NewServer creates a new server instance.
-func NewServer(host, route string, headers map[string]string) *Server {
+func NewServer(host, route string, headers map[string]string, withMetrics bool) *Server {
 	s := &Server{
-		Host:    host,
-		Route:   route,
-		Methods: make(map[string]MethodWithContext),
-		Headers: headers,
+		Host:          host,
+		Route:         route,
+		Methods:       make(map[string]MethodWithContext),
+		Headers:       headers,
+		EnableMetrics: withMetrics,
+	}
+	if s.EnableMetrics {
+		s.metrics = make(map[string]*RpcMetrics)
 	}
 
 	s.Methods["jrpc2.register"] = MethodWithContext{Method: s.RegisterRPC}
@@ -573,8 +657,9 @@ func (s *MuxServer) Start() {
 func (s *MuxServer) StartTLS(certFile, keyFile string) {
 	for route, handler := range s.Handlers {
 		s := &Server{
-			Methods: handler.Methods,
-			Headers: s.Headers,
+			Methods:       handler.Methods,
+			Headers:       s.Headers,
+			EnableMetrics: true,
 		}
 		http.HandleFunc(route, s.rpcHandler)
 		log.Println(fmt.Sprintf("adding handler at %s", route))

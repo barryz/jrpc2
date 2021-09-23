@@ -222,7 +222,7 @@ func init() {
 	go func() { // primary server with subtract remote server proxy
 		s := NewServer(":31500", "/api/v1/rpc", map[string]string{
 			"X-Test-Header": "some-test-value",
-		})
+		}, false)
 		s.Register("sum", Method{Method: Sum})
 		s.RegisterWithContext("say", MethodWithContext{Method: Say})
 		s.StartWithMiddleware(func(next http.HandlerFunc) http.HandlerFunc {
@@ -236,7 +236,7 @@ func init() {
 	go func() { // primary server with subtract remote TLS server proxy
 		s := NewServer(":31511", "/api/v4/rpc", map[string]string{
 			"X-Test-Header": "some-test-value",
-		})
+		}, false)
 		s.Register("update", Method{Method: func(params json.RawMessage) (interface{}, *ErrorObject) { return nil, nil }})
 		s.Register("foobar", Method{Method: func(params json.RawMessage) (interface{}, *ErrorObject) { return nil, nil }})
 		s.StartTLSWithMiddleware(crt, key, func(next http.HandlerFunc) http.HandlerFunc {

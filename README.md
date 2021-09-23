@@ -178,6 +178,108 @@ Methods can also be explicitly registered using the server's Register method:
 
 ```s.Register("add", jrpc2.Method{Url: "http://localhost:8080/api/v1/rpc"})```
 
+
+### Prometheus integration
+
+Metrics systems can easily help us troubleshoot system problems. The jrpc2 server integrated Prometheus with params `EnableMetrics` while Initialize server.
+
+```golang
+package main
+
+import (
+    "encoding/json"
+    "errors"
+    "os"
+    "net/http"
+    "log"
+
+    "github.com/bitwurx/jrpc2"
+
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+// This struct is used for unmarshaling the method params
+type AddParams struct {
+    X *float64 `json:"x"`
+    Y *float64 `json:"y"`
+}
+
+// Each params struct must implement the FromPositional method.
+// This method will be passed an array of interfaces if positional parameters
+// are passed in the rpc call
+func (ap *AddParams) FromPositional(params []interface{}) error {
+    if len(params) != 2 {
+        return errors.New("exactly two integers are required")
+    }
+
+    x := params[0].(float64)
+    y := params[1].(float64)
+    ap.X = &x
+    ap.Y = &y
+
+    return nil
+}
+
+// Each method should match the prototype <fn(json.RawMessage) (inteface{}, *ErrorObject)>
+func Add(params json.RawMessage) (interface{}, *jrpc2.ErrorObject) {
+    p := new(AddParams)
+
+    // ParseParams is a helper function that automatically invokes the FromPositional
+    // method on the params instance if required
+    if err := jrpc2.ParseParams(params, p); err != nil {
+        return nil, err
+    }
+
+    if p.X == nil || p.Y == nil {
+        return nil, &jrpc2.ErrorObject{
+            Code:    jrpc2.InvalidParamsCode,
+            Message: jrpc2.InvalidParamsMsg,
+            Data:    "exactly two integers are required",
+        }
+    }
+
+    return *p.X + *p.Y, nil
+}
+
+func main() {
+    // create a new server instance
+    // set `EnableMetrics`
+    s := jrpc2.NewServer(":8808", "/", nil, true)
+    // register the add method
+    s.Register("add", jrpc2.Method{Method: Add})
+    go func() {
+        s.StartWithMiddleware(func(next http.HandlerFunc) http.HandlerFunc {
+            return func(w http.ResponseWriter, r *http.Request) {
+                req := r.WithContext(context.WithValue(r.Context(), "user", r.Header.Get("user")))
+                next(w, req)
+            }
+        })
+    }()
+
+    prom := &http.Server{
+        Addr: ":9199",
+        Handler: promhttp.InstrumentMetricHandler(
+            prometheus.DefaultRegisterer, promhttp.HandlerFor(
+                prometheus.DefaultGatherer,
+                promhttp.HandlerOpts{MaxRequestsInFlight: 1024},
+            )),
+    }
+
+    go func() {
+        if err := prom.ListenAndServe(); err != http.ErrServerClosed {
+            log.Fatalf("Prometheus HTTP server ListenAndServe %s error", err)
+        }
+    }()
+
+    select {}
+}
+```
+
+Once the program has started, the metrics can be listed at http://localhost:9199/metrics.
+
+Note that the metrics system is not currently available in Multiplexing Server.
+
 ### Running Tests
 
 This library contains a set of api tests to verify spec compliance. The provided tests are a subset of the [Section 7 Examples](http://www.jsonrpc.org/specification#examples) here.
