@@ -4,6 +4,19 @@
 
 This library is an HTTP server implementation of the [JSON-RPC 2.0 Specification](http://www.jsonrpc.org/specification). The library is fully spec compliant with support for named and positional arguments and batch requests.
 
+### Notice: This repository is forked from [bitwurx/jrpc2](https://github.com/bitwurx/jrpc2) with additional features and bug-fixes.
+
+#### Features
+
+- Go module supported
+- CI supported
+- Prometheus integrated
+
+#### Bug-fixes
+
+- TBD#1
+
+
 ### Installation
 ```sh
 go get github.com/bitwurx/jrpc2
