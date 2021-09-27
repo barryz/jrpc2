@@ -221,6 +221,7 @@ type Server struct {
 	EnableMetrics bool
 	mrw           sync.RWMutex
 	metrics       map[string]*RpcMetrics
+	server        *http.Server
 }
 
 func (s *Server) registerMetrics(method string) {
@@ -557,8 +558,33 @@ func (s *Server) Start() {
 }
 
 func (s *Server) start() {
-	log.Println(fmt.Sprintf("Starting server on %s at %s", s.Host, s.Route))
-	log.Fatal(http.ListenAndServe(s.Host, nil))
+	log.Fatal(s.server.ListenAndServe())
+}
+
+// Stop stops the underlying http server with timeout in seconds.
+func (s *Server) Stop(timeout int) error {
+	return s.stop(time.Duration(timeout) * time.Second)
+}
+
+func (s *Server) stop(timeout time.Duration) error {
+	if s.server == nil {
+		return nil
+	}
+
+	switch {
+	default:
+		if err := s.server.Close(); err != http.ErrServerClosed {
+			return err
+		}
+	case timeout > 0:
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if err := s.server.Shutdown(ctx); err != http.ErrServerClosed {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Start binds the rpcHandler to the server route and starts the https server.
@@ -600,6 +626,8 @@ func NewServer(host, route string, headers map[string]string, withMetrics bool) 
 	}
 
 	s.Methods["jrpc2.register"] = MethodWithContext{Method: s.RegisterRPC}
+
+	s.server = &http.Server{Addr: host, Handler: nil}
 
 	return s
 }
