@@ -523,7 +523,8 @@ func (s *Server) Call(ctx context.Context, name interface{}, params json.RawMess
 				Data:    err.Error(),
 			}
 		}
-		data, err := http.Post(method.Url, "application/json", bytes.NewBuffer(body))
+		client := http.Client{Timeout: time.Second * 10}
+		data, err := client.Post(method.Url, "application/json", bytes.NewBuffer(body))
 		if err != nil {
 			return nil, &ErrorObject{
 				Code:    InternalErrorCode,
